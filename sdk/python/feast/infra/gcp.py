@@ -1,166 +1,145 @@
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-import mmh3
-from pytz import utc
+import pandas
+from tqdm import tqdm
 
-from feast import FeatureTable, FeatureView
-from feast.infra.provider import Provider
-from feast.repo_config import DatastoreOnlineStoreConfig
-from feast.types.EntityKey_pb2 import EntityKey as EntityKeyProto
-from feast.types.Value_pb2 import Value as ValueProto
-
-from .key_encoding_utils import serialize_entity_key
-
-
-def _delete_all_values(client, key) -> None:
-    """
-    Delete all data under the key path in datastore.
-    """
-    while True:
-        query = client.query(kind="Row", ancestor=key)
-        entities = list(query.fetch(limit=1000))
-        if not entities:
-            return
-
-        for entity in entities:
-            print("Deleting: {}".format(entity))
-            client.delete(entity.key)
+from feast import FeatureTable
+from feast.entity import Entity
+from feast.feature_view import FeatureView
+from feast.infra.offline_stores.offline_utils import get_offline_store_from_config
+from feast.infra.online_stores.helpers import get_online_store_from_config
+from feast.infra.provider import (
+    Provider,
+    RetrievalJob,
+    _convert_arrow_to_proto,
+    _get_column_names,
+    _run_field_mapping,
+)
+from feast.protos.feast.types.EntityKey_pb2 import EntityKey as EntityKeyProto
+from feast.protos.feast.types.Value_pb2 import Value as ValueProto
+from feast.registry import Registry
+from feast.repo_config import RepoConfig
 
 
-def compute_datastore_entity_id(entity_key: EntityKeyProto) -> str:
-    """
-    Compute Datastore Entity id given Feast Entity Key.
-
-    Remember that Datastore Entity is a concept from the Datastore data model, that has nothing to
-    do with the Entity concept we have in Feast.
-    """
-    return mmh3.hash_bytes(serialize_entity_key(entity_key)).hex()
-
-
-def _make_tzaware(t: datetime):
-    """ We assume tz-naive datetimes are UTC """
-    if t.tzinfo is None:
-        return t.replace(tzinfo=utc)
-    else:
-        return t
-
-
-class Gcp(Provider):
+class GcpProvider(Provider):
     _gcp_project_id: Optional[str]
+    _namespace: Optional[str]
 
-    def __init__(self, config: Optional[DatastoreOnlineStoreConfig]):
-        if config:
-            self._gcp_project_id = config.project_id
-        else:
-            self._gcp_project_id = None
-
-    def _initialize_client(self):
-        from google.cloud import datastore
-
-        if self._gcp_project_id is not None:
-            return datastore.Client(self.project_id)
-        else:
-            return datastore.Client()
+    def __init__(self, config: RepoConfig):
+        self.repo_config = config
+        self.offline_store = get_offline_store_from_config(config.offline_store)
+        self.online_store = get_online_store_from_config(config.online_store)
 
     def update_infra(
         self,
         project: str,
-        tables_to_delete: List[Union[FeatureTable, FeatureView]],
-        tables_to_keep: List[Union[FeatureTable, FeatureView]],
+        tables_to_delete: Sequence[Union[FeatureTable, FeatureView]],
+        tables_to_keep: Sequence[Union[FeatureTable, FeatureView]],
+        entities_to_delete: Sequence[Entity],
+        entities_to_keep: Sequence[Entity],
+        partial: bool,
     ):
-        from google.cloud import datastore
-
-        client = self._initialize_client()
-
-        for table in tables_to_keep:
-            key = client.key("Project", project, "Table", table.name)
-            entity = datastore.Entity(key=key)
-            entity.update({"created_ts": datetime.utcnow()})
-            client.put(entity)
-
-        for table in tables_to_delete:
-            _delete_all_values(
-                client, client.key("Project", project, "Table", table.name)
-            )
-
-            # Delete the table metadata datastore entity
-            key = client.key("Project", project, "Table", table.name)
-            client.delete(key)
+        self.online_store.update(
+            config=self.repo_config,
+            tables_to_delete=tables_to_delete,
+            tables_to_keep=tables_to_keep,
+            entities_to_keep=entities_to_keep,
+            entities_to_delete=entities_to_delete,
+            partial=partial,
+        )
 
     def teardown_infra(
-        self, project: str, tables: List[Union[FeatureTable, FeatureView]]
+        self,
+        project: str,
+        tables: Sequence[Union[FeatureTable, FeatureView]],
+        entities: Sequence[Entity],
     ) -> None:
-        client = self._initialize_client()
-
-        for table in tables:
-            _delete_all_values(
-                client, client.key("Project", project, "Table", table.name)
-            )
-
-            # Delete the table metadata datastore entity
-            key = client.key("Project", project, "Table", table.name)
-            client.delete(key)
+        self.online_store.teardown(self.repo_config, tables, entities)
 
     def online_write_batch(
         self,
-        project: str,
+        config: RepoConfig,
         table: Union[FeatureTable, FeatureView],
-        data: List[Tuple[EntityKeyProto, Dict[str, ValueProto], datetime]],
-        created_ts: datetime,
+        data: List[
+            Tuple[EntityKeyProto, Dict[str, ValueProto], datetime, Optional[datetime]]
+        ],
+        progress: Optional[Callable[[int], Any]],
     ) -> None:
-        from google.cloud import datastore
-
-        client = self._initialize_client()
-
-        for entity_key, features, timestamp in data:
-            document_id = compute_datastore_entity_id(entity_key)
-
-            key = client.key(
-                "Project", project, "Table", table.name, "Row", document_id,
-            )
-            with client.transaction():
-                entity = client.get(key)
-                if entity is not None:
-                    if entity["event_ts"] > _make_tzaware(timestamp):
-                        # Do not overwrite feature values computed from fresher data
-                        continue
-                    elif entity["event_ts"] == _make_tzaware(timestamp) and entity[
-                        "created_ts"
-                    ] > _make_tzaware(created_ts):
-                        # Do not overwrite feature values computed from the same data, but
-                        # computed later than this one
-                        continue
-                else:
-                    entity = datastore.Entity(key=key)
-
-                entity.update(
-                    dict(
-                        key=entity_key.SerializeToString(),
-                        values={k: v.SerializeToString() for k, v in features.items()},
-                        event_ts=_make_tzaware(timestamp),
-                        created_ts=_make_tzaware(created_ts),
-                    )
-                )
-                client.put(entity)
+        self.online_store.online_write_batch(config, table, data, progress)
 
     def online_read(
         self,
-        project: str,
+        config: RepoConfig,
         table: Union[FeatureTable, FeatureView],
-        entity_key: EntityKeyProto,
-    ) -> Tuple[Optional[datetime], Optional[Dict[str, ValueProto]]]:
-        client = self._initialize_client()
+        entity_keys: List[EntityKeyProto],
+        requested_features: List[str] = None,
+    ) -> List[Tuple[Optional[datetime], Optional[Dict[str, ValueProto]]]]:
+        result = self.online_store.online_read(config, table, entity_keys)
 
-        document_id = compute_datastore_entity_id(entity_key)
-        key = client.key("Project", project, "Table", table.name, "Row", document_id)
-        value = client.get(key)
-        if value is not None:
-            res = {}
-            for feature_name, value_bin in value["values"].items():
-                val = ValueProto()
-                val.ParseFromString(value_bin)
-                res[feature_name] = val
-            return value["event_ts"], res
-        else:
-            return None, None
+        return result
+
+    def materialize_single_feature_view(
+        self,
+        config: RepoConfig,
+        feature_view: FeatureView,
+        start_date: datetime,
+        end_date: datetime,
+        registry: Registry,
+        project: str,
+        tqdm_builder: Callable[[int], tqdm],
+    ) -> None:
+        entities = []
+        for entity_name in feature_view.entities:
+            entities.append(registry.get_entity(entity_name, project))
+
+        (
+            join_key_columns,
+            feature_name_columns,
+            event_timestamp_column,
+            created_timestamp_column,
+        ) = _get_column_names(feature_view, entities)
+
+        offline_job = self.offline_store.pull_latest_from_table_or_query(
+            config=config,
+            data_source=feature_view.batch_source,
+            join_key_columns=join_key_columns,
+            feature_name_columns=feature_name_columns,
+            event_timestamp_column=event_timestamp_column,
+            created_timestamp_column=created_timestamp_column,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        table = offline_job.to_arrow()
+
+        if feature_view.batch_source.field_mapping is not None:
+            table = _run_field_mapping(table, feature_view.batch_source.field_mapping)
+
+        join_keys = [entity.join_key for entity in entities]
+        rows_to_write = _convert_arrow_to_proto(table, feature_view, join_keys)
+
+        with tqdm_builder(len(rows_to_write)) as pbar:
+            self.online_write_batch(
+                self.repo_config, feature_view, rows_to_write, lambda x: pbar.update(x)
+            )
+
+    def get_historical_features(
+        self,
+        config: RepoConfig,
+        feature_views: List[FeatureView],
+        feature_refs: List[str],
+        entity_df: Union[pandas.DataFrame, str],
+        registry: Registry,
+        project: str,
+        full_feature_names: bool,
+    ) -> RetrievalJob:
+        job = self.offline_store.get_historical_features(
+            config=config,
+            feature_views=feature_views,
+            feature_refs=feature_refs,
+            entity_df=entity_df,
+            registry=registry,
+            project=project,
+            full_feature_names=full_feature_names,
+        )
+        return job

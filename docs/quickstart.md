@@ -1,91 +1,139 @@
 # Quickstart
 
-## Overview
+In this tutorial we will
 
-This guide shows you how to deploy Feast using [Docker Compose](https://docs.docker.com/get-started/). Docker Compose allows you to explore the functionality provided by Feast while requiring only minimal infrastructure.
+1. Deploy a local feature store with a **Parquet file offline store** and **Sqlite online store**.
+2. Build a training dataset using our time series features from our **Parquet files**.
+3. Materialize feature values from the offline store into the online store.
+4. Read the latest features from the online store for inference.
 
-This guide includes the following containerized components:
+You can run this tutorial in Google Colab or run it on your local host, following the guided steps below.
 
-* [A complete Feast deployment](concepts/architecture.md)
-  * Feast Core with Postgres
-  * Feast Online Serving with Redis.
-  * Feast Job Service
-* A Jupyter Notebook Server with built in Feast example\(s\). For demo purposes only.
-* A Kafka cluster for testing streaming ingestion. For demo purposes only.
+| ![](.gitbook/assets/colab_logo_32px.png) [Run in Google Colab](https://colab.research.google.com/github/feast-dev/feast/blob/master/examples/quickstart/quickstart.ipynb) |
+| :--- |
 
-## Requirements
 
-* [Docker Compose](https://docs.docker.com/compose/install/)
+## Step 1: Install Feast
 
-## Get Feast
+Install the Feast SDK and CLI using pip:
 
-Clone the latest stable version of Feast from the [Feast repository](https://github.com/feast-dev/feast/):
+```bash
+pip install feast
+```
+
+## Step 2: Create a feature repository
+
+Bootstrap a new feature repository using `feast init` from the command line:
 
 ```text
-git clone https://github.com/feast-dev/feast.git
-cd feast/infra/docker-compose
+feast init feature_repo
+cd feature_repo
 ```
-
-Create a new configuration file:
 
 ```text
-cp .env.sample .env
+Creating a new Feast repository in /home/Jovyan/feature_repo.
 ```
 
-## Start Feast
+## Step 3: Register feature definitions and deploy your feature store
 
-Start Feast with Docker Compose:
+The `apply` command registers all the objects in your feature repository and deploys a feature store:
+
+```bash
+feast apply
+```
 
 ```text
-docker-compose pull && docker-compose up -d
+Registered entity driver_id
+Registered feature view driver_hourly_stats
+Deploying infrastructure for driver_hourly_stats
 ```
 
-Wait until all all containers are in a running state:
+## Step 4: Generating training data
 
-```text
-docker-compose ps
+The `apply` command builds a training dataset based on the time-series features defined in the feature repository:
+
+```python
+from datetime import datetime
+
+import pandas as pd
+
+from feast import FeatureStore
+
+entity_df = pd.DataFrame.from_dict(
+    {
+        "driver_id": [1001, 1002, 1003, 1004],
+        "event_timestamp": [
+            datetime(2021, 4, 12, 10, 59, 42),
+            datetime(2021, 4, 12, 8, 12, 10),
+            datetime(2021, 4, 12, 16, 40, 26),
+            datetime(2021, 4, 12, 15, 1, 12),
+        ],
+    }
+)
+
+store = FeatureStore(repo_path=".")
+
+training_df = store.get_historical_features(
+    entity_df=entity_df,
+    features=[
+        "driver_hourly_stats:conv_rate",
+        "driver_hourly_stats:acc_rate",
+        "driver_hourly_stats:avg_daily_trips",
+    ],
+).to_df()
+
+print(training_df.head())
 ```
 
-## Try our example\(s\)
-
-You can now connect to the bundled Jupyter Notebook Server running at `localhost:8888` and follow the example Jupyter notebook.
-
-{% embed url="http://localhost:8888/tree?" caption="" %}
-
-## Troubleshooting
-
-### Open ports
-
-Please ensure that the following ports are available on your host machine:
-
-* `6565` 
-* `6566`
-* `8888`
-* `9094`
-* `5432`
-
-If a port conflict cannot be resolved, you can modify the port mappings in the provided [docker-compose.yml](https://github.com/feast-dev/feast/tree/master/infra/docker-compose) file to use different ports on the host.
-
-### Containers are restarting or unavailable
-
-If some of the containers continue to restart, or you are unable to access a service, inspect the logs using the following command:
-
-```javascript
-docker-compose logs -f -t
+```bash
+event_timestamp   driver_id  driver_hourly_stats__conv_rate  driver_hourly_stats__acc_rate  driver_hourly_stats__avg_daily_trips
+2021-04-12        1002       0.328245                        0.993218                       329
+2021-04-12        1001       0.448272                        0.873785                       767
+2021-04-12        1004       0.822571                        0.571790                       673
+2021-04-12        1003       0.556326                        0.605357                       335
 ```
 
-If you are unable to resolve the problem, visit [GitHub](https://github.com/feast-dev/feast/issues) to create an issue.
+## Step 5: Load features into your online store
 
-## Configuration
+The `materialize` command loads the latest feature values from your feature views into your online store:
 
-The Feast Docker Compose setup can be configured by modifying properties in your `.env` file.
+```bash
+CURRENT_TIME=$(date -u +"%Y-%m-%dT%H:%M:%S")
+feast materialize-incremental $CURRENT_TIME
+```
 
-### Accessing Google Cloud Storage \(GCP\)
+## Step 6: Fetching feature vectors for inference
 
-To access Google Cloud Storage as a data source, the Docker Compose installation requires access to a GCP service account.
+```python
+from pprint import pprint
+from feast import FeatureStore
 
-* Create a new [service account](https://cloud.google.com/iam/docs/creating-managing-service-accounts) and save a JSON key.
-* Grant the service account access to your bucket\(s\).
-* Copy the service account to the path you have configured in `.env` under `GCP_SERVICE_ACCOUNT`.
-* Restart your Docker Compose setup of Feast.
+store = FeatureStore(repo_path=".")
+
+feature_vector = store.get_online_features(
+    features=[
+        "driver_hourly_stats:conv_rate",
+        "driver_hourly_stats:acc_rate",
+        "driver_hourly_stats:avg_daily_trips",
+    ],
+    entity_rows=[{"driver_id": 1001}],
+).to_dict()
+
+pprint(feature_vector)
+```
+
+```python
+{
+    'driver_id': [1001],
+    'conv_rate': [0.49274],
+    'acc_rate': [0.92743],
+    'avg_daily_trips': [72],
+}
+```
+
+## Next steps
+
+* Follow our [Getting Started](getting-started/) guide for a hands tutorial in using Feast
+* Check out our [Tutorials](feast-on-kubernetes-1/tutorials-1/) section for more examples on how to use Feast.
+* Join other Feast users and contributors in [Slack](https://slack.feast.dev/) and become part of the community!
 

@@ -14,10 +14,14 @@
 
 
 import enum
-from typing import Dict, Optional
+from abc import ABC, abstractmethod
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
-from feast.core.DataSource_pb2 import DataSource as DataSourceProto
-from feast.data_format import FileFormat, StreamFormat
+from feast import type_map
+from feast.data_format import StreamFormat
+from feast.protos.feast.core.DataSource_pb2 import DataSource as DataSourceProto
+from feast.repo_config import RepoConfig, get_data_source_class_from_type
+from feast.value_type import ValueType
 
 
 class SourceType(enum.Enum):
@@ -30,132 +34,6 @@ class SourceType(enum.Enum):
     BATCH_BIGQUERY = 2
     STREAM_KAFKA = 3
     STREAM_KINESIS = 4
-
-
-class FileOptions:
-    """
-    DataSource File options used to source features from a file
-    """
-
-    def __init__(
-        self, file_format: FileFormat, file_url: str,
-    ):
-        self._file_format = file_format
-        self._file_url = file_url
-
-    @property
-    def file_format(self):
-        """
-        Returns the file format of this file
-        """
-        return self._file_format
-
-    @file_format.setter
-    def file_format(self, file_format):
-        """
-        Sets the file format of this file
-        """
-        self._file_format = file_format
-
-    @property
-    def file_url(self):
-        """
-        Returns the file url of this file
-        """
-        return self._file_url
-
-    @file_url.setter
-    def file_url(self, file_url):
-        """
-        Sets the file url of this file
-        """
-        self._file_url = file_url
-
-    @classmethod
-    def from_proto(cls, file_options_proto: DataSourceProto.FileOptions):
-        """
-        Creates a FileOptions from a protobuf representation of a file option
-
-        args:
-            file_options_proto: a protobuf representation of a datasource
-
-        Returns:
-            Returns a FileOptions object based on the file_options protobuf
-        """
-        file_options = cls(
-            file_format=FileFormat.from_proto(file_options_proto.file_format),
-            file_url=file_options_proto.file_url,
-        )
-        return file_options
-
-    def to_proto(self) -> DataSourceProto.FileOptions:
-        """
-        Converts an FileOptionsProto object to its protobuf representation.
-
-        Returns:
-            FileOptionsProto protobuf
-        """
-
-        file_options_proto = DataSourceProto.FileOptions(
-            file_format=self.file_format.to_proto(), file_url=self.file_url,
-        )
-
-        return file_options_proto
-
-
-class BigQueryOptions:
-    """
-    DataSource BigQuery options used to source features from BigQuery query
-    """
-
-    def __init__(
-        self, table_ref: str,
-    ):
-        self._table_ref = table_ref
-
-    @property
-    def table_ref(self):
-        """
-        Returns the table ref of this BQ table
-        """
-        return self._table_ref
-
-    @table_ref.setter
-    def table_ref(self, table_ref):
-        """
-        Sets the table ref of this BQ table
-        """
-        self._table_ref = table_ref
-
-    @classmethod
-    def from_proto(cls, bigquery_options_proto: DataSourceProto.BigQueryOptions):
-        """
-        Creates a BigQueryOptions from a protobuf representation of a BigQuery option
-
-        Args:
-            bigquery_options_proto: A protobuf representation of a DataSource
-
-        Returns:
-            Returns a BigQueryOptions object based on the bigquery_options protobuf
-        """
-
-        bigquery_options = cls(table_ref=bigquery_options_proto.table_ref,)
-
-        return bigquery_options
-
-    def to_proto(self) -> DataSourceProto.BigQueryOptions:
-        """
-        Converts an BigQueryOptionsProto object to its protobuf representation.
-
-        Returns:
-            BigQueryOptionsProto protobuf
-        """
-
-        bigquery_options_proto = DataSourceProto.BigQueryOptions(
-            table_ref=self.table_ref,
-        )
-
-        return bigquery_options_proto
 
 
 class KafkaOptions:
@@ -340,22 +218,44 @@ class KinesisOptions:
         return kinesis_options_proto
 
 
-class DataSource:
+class DataSource(ABC):
     """
-    DataSource that can be used source features
+    DataSource that can be used to source features.
+
+    Args:
+        event_timestamp_column (optional): Event timestamp column used for point in time
+            joins of feature values.
+        created_timestamp_column (optional): Timestamp column indicating when the row
+            was created, used for deduplicating rows.
+        field_mapping (optional): A dictionary mapping of column names in this data
+            source to feature names in a feature table or view. Only used for feature
+            columns, not entity or timestamp columns.
+        date_partition_column (optional): Timestamp column used for partitioning.
     """
+
+    _event_timestamp_column: str
+    _created_timestamp_column: str
+    _field_mapping: Dict[str, str]
+    _date_partition_column: str
 
     def __init__(
         self,
-        event_timestamp_column: str,
-        created_timestamp_column: Optional[str] = "",
+        event_timestamp_column: Optional[str] = None,
+        created_timestamp_column: Optional[str] = None,
         field_mapping: Optional[Dict[str, str]] = None,
-        date_partition_column: Optional[str] = "",
+        date_partition_column: Optional[str] = None,
     ):
-        self._event_timestamp_column = event_timestamp_column
-        self._created_timestamp_column = created_timestamp_column
+        """Creates a DataSource object."""
+        self._event_timestamp_column = (
+            event_timestamp_column if event_timestamp_column else ""
+        )
+        self._created_timestamp_column = (
+            created_timestamp_column if created_timestamp_column else ""
+        )
         self._field_mapping = field_mapping if field_mapping else {}
-        self._date_partition_column = date_partition_column
+        self._date_partition_column = (
+            date_partition_column if date_partition_column else ""
+        )
 
     def __eq__(self, other):
         if not isinstance(other, DataSource):
@@ -372,246 +272,162 @@ class DataSource:
         return True
 
     @property
-    def field_mapping(self):
+    def field_mapping(self) -> Dict[str, str]:
         """
-        Returns the field mapping of this data source
+        Returns the field mapping of this data source.
         """
         return self._field_mapping
 
     @field_mapping.setter
     def field_mapping(self, field_mapping):
         """
-        Sets the field mapping of this data source
+        Sets the field mapping of this data source.
         """
         self._field_mapping = field_mapping
 
     @property
-    def event_timestamp_column(self):
+    def event_timestamp_column(self) -> str:
         """
-        Returns the event timestamp column of this data source
+        Returns the event timestamp column of this data source.
         """
         return self._event_timestamp_column
 
     @event_timestamp_column.setter
     def event_timestamp_column(self, event_timestamp_column):
         """
-        Sets the event timestamp column of this data source
+        Sets the event timestamp column of this data source.
         """
         self._event_timestamp_column = event_timestamp_column
 
     @property
-    def created_timestamp_column(self):
+    def created_timestamp_column(self) -> str:
         """
-        Returns the created timestamp column of this data source
+        Returns the created timestamp column of this data source.
         """
         return self._created_timestamp_column
 
     @created_timestamp_column.setter
     def created_timestamp_column(self, created_timestamp_column):
         """
-        Sets the created timestamp column of this data source
+        Sets the created timestamp column of this data source.
         """
         self._created_timestamp_column = created_timestamp_column
 
     @property
-    def date_partition_column(self):
+    def date_partition_column(self) -> str:
         """
-        Returns the date partition column of this data source
+        Returns the date partition column of this data source.
         """
         return self._date_partition_column
 
     @date_partition_column.setter
     def date_partition_column(self, date_partition_column):
         """
-        Sets the date partition column of this data source
+        Sets the date partition column of this data source.
         """
         self._date_partition_column = date_partition_column
 
     @staticmethod
-    def from_proto(data_source):
+    @abstractmethod
+    def from_proto(data_source: DataSourceProto) -> Any:
         """
-        Convert data source config in FeatureTable spec to a DataSource class object.
+        Converts data source config in FeatureTable spec to a DataSource class object.
+
+        Args:
+            data_source: A protobuf representation of a DataSource.
+
+        Returns:
+            A DataSource class object.
+
+        Raises:
+            ValueError: The type of DataSource could not be identified.
         """
+        if data_source.data_source_class_type:
+            cls = get_data_source_class_from_type(data_source.data_source_class_type)
+            return cls.from_proto(data_source)
 
         if data_source.file_options.file_format and data_source.file_options.file_url:
-            data_source_obj = FileSource(
-                field_mapping=data_source.field_mapping,
-                file_format=FileFormat.from_proto(data_source.file_options.file_format),
-                file_url=data_source.file_options.file_url,
-                event_timestamp_column=data_source.event_timestamp_column,
-                created_timestamp_column=data_source.created_timestamp_column,
-                date_partition_column=data_source.date_partition_column,
-            )
-        elif data_source.bigquery_options.table_ref:
-            data_source_obj = BigQuerySource(
-                field_mapping=data_source.field_mapping,
-                table_ref=data_source.bigquery_options.table_ref,
-                event_timestamp_column=data_source.event_timestamp_column,
-                created_timestamp_column=data_source.created_timestamp_column,
-                date_partition_column=data_source.date_partition_column,
-            )
+            from feast.infra.offline_stores.file_source import FileSource
+
+            data_source_obj = FileSource.from_proto(data_source)
+        elif (
+            data_source.bigquery_options.table_ref or data_source.bigquery_options.query
+        ):
+            from feast.infra.offline_stores.bigquery_source import BigQuerySource
+
+            data_source_obj = BigQuerySource.from_proto(data_source)
+        elif data_source.redshift_options.table or data_source.redshift_options.query:
+            from feast.infra.offline_stores.redshift_source import RedshiftSource
+
+            data_source_obj = RedshiftSource.from_proto(data_source)
         elif (
             data_source.kafka_options.bootstrap_servers
             and data_source.kafka_options.topic
             and data_source.kafka_options.message_format
         ):
-            data_source_obj = KafkaSource(
-                field_mapping=data_source.field_mapping,
-                bootstrap_servers=data_source.kafka_options.bootstrap_servers,
-                message_format=StreamFormat.from_proto(
-                    data_source.kafka_options.message_format
-                ),
-                topic=data_source.kafka_options.topic,
-                event_timestamp_column=data_source.event_timestamp_column,
-                created_timestamp_column=data_source.created_timestamp_column,
-                date_partition_column=data_source.date_partition_column,
-            )
+            data_source_obj = KafkaSource.from_proto(data_source)
         elif (
             data_source.kinesis_options.record_format
             and data_source.kinesis_options.region
             and data_source.kinesis_options.stream_name
         ):
-            data_source_obj = KinesisSource(
-                field_mapping=data_source.field_mapping,
-                record_format=StreamFormat.from_proto(
-                    data_source.kinesis_options.record_format
-                ),
-                region=data_source.kinesis_options.region,
-                stream_name=data_source.kinesis_options.stream_name,
-                event_timestamp_column=data_source.event_timestamp_column,
-                created_timestamp_column=data_source.created_timestamp_column,
-                date_partition_column=data_source.date_partition_column,
-            )
+            data_source_obj = KinesisSource.from_proto(data_source)
         else:
-            raise ValueError("Could not identify the source type being added")
+            raise ValueError("Could not identify the source type being added.")
 
         return data_source_obj
 
+    @abstractmethod
     def to_proto(self) -> DataSourceProto:
         """
         Converts an DataSourceProto object to its protobuf representation.
         """
         raise NotImplementedError
 
-
-class FileSource(DataSource):
-    def __init__(
-        self,
-        event_timestamp_column: str,
-        file_format: FileFormat,
-        file_url: str,
-        created_timestamp_column: Optional[str] = "",
-        field_mapping: Optional[Dict[str, str]] = None,
-        date_partition_column: Optional[str] = "",
-    ):
-        super().__init__(
-            event_timestamp_column,
-            created_timestamp_column,
-            field_mapping,
-            date_partition_column,
-        )
-        self._file_options = FileOptions(file_format=file_format, file_url=file_url)
-
-    def __eq__(self, other):
-        if not isinstance(other, FileSource):
-            raise TypeError("Comparisons should only involve FileSource class objects.")
-
-        if (
-            self.file_options.file_url != other.file_options.file_url
-            or self.file_options.file_format != other.file_options.file_format
-        ):
-            return False
-        return True
-
-    @property
-    def file_options(self):
+    def validate(self, config: RepoConfig):
         """
-        Returns the file options of this data source
+        Validates the underlying data source.
+
+        Args:
+            config: Configuration object used to configure a feature store.
         """
-        return self._file_options
+        raise NotImplementedError
 
-    @file_options.setter
-    def file_options(self, file_options):
+    @staticmethod
+    @abstractmethod
+    def source_datatype_to_feast_value_type() -> Callable[[str], ValueType]:
         """
-        Sets the file options of this data source
+        Returns the callable method that returns Feast type given the raw column type.
         """
-        self._file_options = file_options
+        raise NotImplementedError
 
-    def to_proto(self) -> DataSourceProto:
-        data_source_proto = DataSourceProto(
-            type=DataSourceProto.BATCH_FILE,
-            field_mapping=self.field_mapping,
-            file_options=self.file_options.to_proto(),
-        )
-
-        data_source_proto.event_timestamp_column = self.event_timestamp_column
-        data_source_proto.created_timestamp_column = self.created_timestamp_column
-        data_source_proto.date_partition_column = self.date_partition_column
-
-        return data_source_proto
-
-
-class BigQuerySource(DataSource):
-    def __init__(
-        self,
-        event_timestamp_column: str,
-        table_ref: str,
-        created_timestamp_column: Optional[str] = "",
-        field_mapping: Optional[Dict[str, str]] = None,
-        date_partition_column: Optional[str] = "",
-    ):
-        super().__init__(
-            event_timestamp_column,
-            created_timestamp_column,
-            field_mapping,
-            date_partition_column,
-        )
-        self._bigquery_options = BigQueryOptions(table_ref=table_ref,)
-
-    def __eq__(self, other):
-        if not isinstance(other, BigQuerySource):
-            raise TypeError(
-                "Comparisons should only involve BigQuerySource class objects."
-            )
-
-        if self.bigquery_options.table_ref != other.bigquery_options.table_ref:
-            return False
-
-        return True
-
-    @property
-    def table_ref(self):
-        return self._bigquery_options.table_ref
-
-    @property
-    def bigquery_options(self):
+    def get_table_column_names_and_types(
+        self, config: RepoConfig
+    ) -> Iterable[Tuple[str, str]]:
         """
-        Returns the bigquery options of this data source
+        Returns the list of column names and raw column types.
+
+        Args:
+            config: Configuration object used to configure a feature store.
         """
-        return self._bigquery_options
+        raise NotImplementedError
 
-    @bigquery_options.setter
-    def bigquery_options(self, bigquery_options):
+    def get_table_query_string(self) -> str:
         """
-        Sets the bigquery options of this data source
+        Returns a string that can directly be used to reference this table in SQL.
         """
-        self._bigquery_options = bigquery_options
-
-    def to_proto(self) -> DataSourceProto:
-        data_source_proto = DataSourceProto(
-            type=DataSourceProto.BATCH_BIGQUERY,
-            field_mapping=self.field_mapping,
-            bigquery_options=self.bigquery_options.to_proto(),
-        )
-
-        data_source_proto.event_timestamp_column = self.event_timestamp_column
-        data_source_proto.created_timestamp_column = self.created_timestamp_column
-        data_source_proto.date_partition_column = self.date_partition_column
-
-        return data_source_proto
+        raise NotImplementedError
 
 
 class KafkaSource(DataSource):
+    def validate(self, config: RepoConfig):
+        pass
+
+    def get_table_column_names_and_types(
+        self, config: RepoConfig
+    ) -> Iterable[Tuple[str, str]]:
+        pass
+
     def __init__(
         self,
         event_timestamp_column: str,
@@ -619,7 +435,7 @@ class KafkaSource(DataSource):
         message_format: StreamFormat,
         topic: str,
         created_timestamp_column: Optional[str] = "",
-        field_mapping: Optional[Dict[str, str]] = dict(),
+        field_mapping: Optional[Dict[str, str]] = None,
         date_partition_column: Optional[str] = "",
     ):
         super().__init__(
@@ -664,6 +480,20 @@ class KafkaSource(DataSource):
         """
         self._kafka_options = kafka_options
 
+    @staticmethod
+    def from_proto(data_source: DataSourceProto):
+        return KafkaSource(
+            field_mapping=dict(data_source.field_mapping),
+            bootstrap_servers=data_source.kafka_options.bootstrap_servers,
+            message_format=StreamFormat.from_proto(
+                data_source.kafka_options.message_format
+            ),
+            topic=data_source.kafka_options.topic,
+            event_timestamp_column=data_source.event_timestamp_column,
+            created_timestamp_column=data_source.created_timestamp_column,
+            date_partition_column=data_source.date_partition_column,
+        )
+
     def to_proto(self) -> DataSourceProto:
         data_source_proto = DataSourceProto(
             type=DataSourceProto.STREAM_KAFKA,
@@ -677,8 +507,38 @@ class KafkaSource(DataSource):
 
         return data_source_proto
 
+    @staticmethod
+    def source_datatype_to_feast_value_type() -> Callable[[str], ValueType]:
+        return type_map.redshift_to_feast_value_type
+
 
 class KinesisSource(DataSource):
+    def validate(self, config: RepoConfig):
+        pass
+
+    def get_table_column_names_and_types(
+        self, config: RepoConfig
+    ) -> Iterable[Tuple[str, str]]:
+        pass
+
+    @staticmethod
+    def from_proto(data_source: DataSourceProto):
+        return KinesisSource(
+            field_mapping=dict(data_source.field_mapping),
+            record_format=StreamFormat.from_proto(
+                data_source.kinesis_options.record_format
+            ),
+            region=data_source.kinesis_options.region,
+            stream_name=data_source.kinesis_options.stream_name,
+            event_timestamp_column=data_source.event_timestamp_column,
+            created_timestamp_column=data_source.created_timestamp_column,
+            date_partition_column=data_source.date_partition_column,
+        )
+
+    @staticmethod
+    def source_datatype_to_feast_value_type() -> Callable[[str], ValueType]:
+        pass
+
     def __init__(
         self,
         event_timestamp_column: str,
@@ -686,7 +546,7 @@ class KinesisSource(DataSource):
         record_format: StreamFormat,
         region: str,
         stream_name: str,
-        field_mapping: Optional[Dict[str, str]] = dict(),
+        field_mapping: Optional[Dict[str, str]] = None,
         date_partition_column: Optional[str] = "",
     ):
         super().__init__(
@@ -700,6 +560,9 @@ class KinesisSource(DataSource):
         )
 
     def __eq__(self, other):
+        if other is None:
+            return False
+
         if not isinstance(other, KinesisSource):
             raise TypeError(
                 "Comparisons should only involve KinesisSource class objects."

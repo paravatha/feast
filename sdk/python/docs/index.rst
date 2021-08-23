@@ -1,17 +1,26 @@
 Feast Python API Documentation
 =============================
 
-Client
+
+Feature Store
 ==================
 
-.. automodule:: feast.client
+.. automodule:: feast.feature_store
+   :members:
+
+Config
+==================
+
+.. automodule:: feast.repo_config
     :members:
+    :exclude-members: load_repo_config, FeastBaseModel
 
 Data Source
 ==================
 
 .. automodule:: feast.data_source
     :members:
+    :exclude-members: KafkaOptions, KafkaSource, KinesisOptions, KinesisSource
 
 
 Entity
@@ -22,10 +31,10 @@ Entity
     :members:
 
 
-Feature Table
+Feature View
 ==================
 
-.. automodule:: feast.feature_table
+.. automodule:: feast.feature_view
     :members:
 
 Feature
@@ -34,10 +43,3 @@ Feature
 .. automodule:: feast.feature
     :inherited-members:
     :members:
-
-Constants
-==================
-
-.. automodule:: feast.constants
-    :members:
-    :exclude-members: AuthProvider, ConfigMeta

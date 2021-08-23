@@ -14,16 +14,18 @@
 
 from typing import Any, Dict, List, cast
 
-from feast.serving.ServingService_pb2 import (
+import pandas as pd
+
+from feast.protos.feast.serving.ServingService_pb2 import (
     GetOnlineFeaturesRequestV2,
     GetOnlineFeaturesResponse,
 )
+from feast.protos.feast.types.Value_pb2 import Value as Value
 from feast.type_map import (
     _python_value_to_proto_value,
     feast_value_type_to_python_type,
     python_type_to_feast_value_type,
 )
-from feast.types.Value_pb2 import Value as Value
 
 
 class OnlineResponse:
@@ -51,7 +53,7 @@ class OnlineResponse:
         """
         Converts GetOnlineFeaturesResponse features into a dictionary form.
         """
-        fields = [k for row in self.field_values for k, _ in row.fields.items()]
+        fields = [k for row in self.field_values for k, _ in row.statuses.items()]
         features_dict: Dict[str, List[Any]] = {k: list() for k in fields}
 
         for row in self.field_values:
@@ -60,6 +62,13 @@ class OnlineResponse:
                 features_dict[feature].append(native_type_value)
 
         return features_dict
+
+    def to_df(self) -> pd.DataFrame:
+        """
+        Converts GetOnlineFeaturesResponse features into Panda dataframe form.
+        """
+
+        return pd.DataFrame(self.to_dict())
 
 
 def _infer_online_entity_rows(

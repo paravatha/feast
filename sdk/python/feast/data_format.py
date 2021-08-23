@@ -15,8 +15,8 @@
 
 from abc import ABC, abstractmethod
 
-from feast.core.DataFormat_pb2 import FileFormat as FileFormatProto
-from feast.core.DataFormat_pb2 import StreamFormat as StreamFormatProto
+from feast.protos.feast.core.DataFormat_pb2 import FileFormat as FileFormatProto
+from feast.protos.feast.core.DataFormat_pb2 import StreamFormat as StreamFormatProto
 
 
 class FileFormat(ABC):
@@ -43,6 +43,8 @@ class FileFormat(ABC):
         fmt = proto.WhichOneof("format")
         if fmt == "parquet_format":
             return ParquetFormat()
+        if fmt is None:
+            return None
         raise NotImplementedError(f"FileFormat is unsupported: {fmt}")
 
     def __str__(self):

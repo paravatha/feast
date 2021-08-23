@@ -1,51 +1,33 @@
 # Architecture
 
-![](../.gitbook/assets/image%20%286%29%20%283%29%20%283%29%20%283%29%20%283%29%20%283%29%20%283%29.png)
+![Feast 0.10 Architecture Diagram](../.gitbook/assets/image%20%284%29.png)
 
-## Sequence description
+### Functionality
 
-1. **Log Raw Events:** Production backend applications are configured to emit internal state changes as events to a stream.
-2. **Create Stream Features:** Stream processing systems like Flink, Spark, and Beam are used to transform and refine events and to produce features that are logged back to the stream.
-3. **Log Streaming Features:** Both raw and refined events are logged into a data lake or batch storage location.
-4. **Create Batch Features:** ELT/ETL systems like Spark and SQL are used to transform data in the batch store.
-5. **Define and Ingest Features:** The Feast user defines [feature tables](feature-tables.md) based on the features available in batch and streaming sources and publish these definitions to Feast Core.
-6. **Poll Feature Definitions:** The Feast Job Service polls for new or changed feature definitions.
-7. **Start Ingestion Jobs:** Every new feature table definition results in a new ingestion job being provisioned \(see limitations\).
-8. **Batch Ingestion:** Batch ingestion jobs are short-lived jobs that load data from batch sources into either an offline or online store \(see limitations\).
-9. **Stream Ingestion:** Streaming ingestion jobs are long-lived jobs that load data from stream sources into online stores. A stream source and batch source on a feature table must have the same features/fields.
-10. **Model Training:** A model training pipeline is launched. It uses the Feast Python SDK to retrieve a training dataset and trains a model.
-11. **Get Historical Features:** Feast exports a point-in-time correct training dataset based on the list of features and entity DataFrame provided by the model training pipeline.
-12. **Deploy Model:** The trained model binary \(and list of features\) are deployed into a model serving system.
-13. **Get Prediction:** A backend system makes a request for a prediction from the model serving service.
-14. **Retrieve Online Features:** The model serving service makes a request to the Feast Online Serving service for online features using a Feast SDK.
-15. **Return Prediction:** The model serving service makes a prediction using the returned features and returns the outcome.
+* **Create Batch Features:** ELT/ETL systems like Spark and SQL are used to transform data in the batch store.
+* **Feast Apply:**  The user \(or CI\) publishes versioned controlled feature definitions using `feast apply`. This CLI command updates infrastructure and persists definitions in the object store registry.
+* **Feast Materialize:** The user \(or scheduler\) executes `feast materialize` which loads features from the offline store into the online store.
+* **Model Training:** A model training pipeline is launched. It uses the Feast Python SDK to retrieve a training dataset and trains a model.
+* **Get Historical Features:** Feast exports a point-in-time correct training dataset based on the list of features and entity dataframe provided by the model training pipeline.
+* **Deploy Model:** The trained model binary \(and list of features\) are deployed into a model serving system. This step is not executed by Feast.
+* **Prediction:** A backend system makes a request for a prediction from the model serving service.
+* **Get Online Features:** The model serving service makes a request to the Feast Online Serving service for online features using a Feast SDK.
 
-{% hint style="warning" %}
-Limitations
-
-* Feast 0.8 has no offline store. Batch retrieval is direct from source. We plan to implement an optional offline store in Feast 0.9
-* Only Redis is supported for online storage.
-* Batch ingestion jobs must be triggered from your own scheduler like Airflow. Streaming ingestion jobs are automatically launched by the Feast Job Service.
-{% endhint %}
-
-## Components:
+### Components
 
 A complete Feast deployment contains the following components:
 
-* **Feast Core:** Acts as the central registry for feature and entity definitions in Feast. 
-* **Feast Job Service:** Manages data processing jobs that load data from sources into stores, and jobs that export training datasets.
-* **Feast Online Serving:** Provides low-latency access to feature values in an online store.
-* **Feast Python SDK:** The primary user facing SDK. Used to:
-  * Manage feature definitions with Feast Core.
-  * Launch jobs through the Feast Job Service.
-  * Retrieve training datasets.
+* **Feast Online Serving:** Provides low-latency access to feature values stores in the online store. This component is optional. Teams can also read feature values directly from the online store if necessary.
+* **Feast Registry**: An object store \(GCS, S3\) based registry used to persist feature definitions that are registered with the feature store. Systems can discover feature data by interacting with the registry through the Feast SDK.
+* **Feast Python SDK/CLI:** The primary user facing SDK. Used to:
+  * Manage version controlled feature definitions.
+  * Materialize \(load\) feature values into the online store.
+  * Build and retrieve training datasets from the offline store.
   * Retrieve online features.
-* **Online Store:** The online store is a database that stores only the latest feature values for each entity. The online store can be populated by either batch ingestion jobs \(in the case the user has no streaming source\), or can be populated by a streaming ingestion job from a streaming source. Feast Online Serving looks up feature values from the online store.
-* **Offline Store:** The offline store persists batch data that has been ingested into Feast. This data is used for producing training datasets.
-
-Please see the [configuration reference](../reference/configuration-reference.md#overview) for more details on configuring these components.
+* **Online Store:** The online store is a database that stores only the latest feature values for each entity. The online store is populated by materialization jobs.
+* **Offline Store:** The offline store persists batch data that has been ingested into Feast. This data is used for producing training datasets. Feast does not manage the offline store directly, but runs queries against it.
 
 {% hint style="info" %}
-Java and Go SDKs are also available for online feature retrieval. See [API Reference](../reference/api/).
+Java and Go Clients are also available for online feature retrieval. See [API Reference](../feast-on-kubernetes/reference-1/api/).
 {% endhint %}
 
